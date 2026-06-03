@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react"
-import posthog from 'posthog-js'
+// import posthog from 'posthog-js'
 
 // Initialize PostHog
-posthog.init('YOUR_POSTHOG_API_KEY', {
-  api_host: 'https://app.posthog.com',
-})
+//posthog.init('YOUR_POSTHOG_API_KEY', {
+  //api_host: 'https://app.posthog.com',
+//})
 
 export default function App() {
   const [authState, setAuthState] = useState("login")
@@ -58,7 +58,7 @@ export default function App() {
         setAuthState("app")
       } else if (data.user) {
         setAuthError("Signup successful! Please check your email to confirm your account.")
-        posthog.capture('user_signup')
+        //posthog.capture('user_signup')
       } else {
         setAuthError("Signup failed: " + (data.detail || "Unknown error"))
       }
@@ -80,7 +80,7 @@ export default function App() {
         setUser(data.user)
         setToken(data.session.access_token)
         setAuthState("app")
-        posthog.capture('user_login')
+        //posthog.capture('user_login')
       } else {
         setAuthError("Login failed: Invalid credentials")
       }
@@ -138,7 +138,7 @@ export default function App() {
       alert("Failed to upload document")
     }
     setUploading(false)
-    posthog.capture('document_uploaded', {
+    //posthog.capture('document_uploaded', {
        filename: file.filename,
 })
   }
@@ -166,7 +166,7 @@ export default function App() {
     setLoading(true)
     setProposal("")
     setProposalId("")
-    posthog.capture('proposal_generated', {
+    //posthog.capture('proposal_generated', {
     client_name: form.client_name,
     has_documents: documents.length > 0,
 })
