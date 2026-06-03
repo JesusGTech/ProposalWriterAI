@@ -28,7 +28,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://proposalwriterai.vercel.app"],
+    allow_origins=["http://localhost:5173", "https://proposalwriterai-api.onrender.com"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
