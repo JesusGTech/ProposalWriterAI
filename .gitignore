@@ -1,8 +1,9 @@
-# Secret keys — never upload these
+.env
 backend/.env
-
-# Python virtual environment — too big to upload
 backend/venv/
-
-# React dependencies — too big to upload
 frontend/node_modules/
+frontend/dist/
+.DS_Store
+*.pyc
+__pycache__/
+.venv/
