@@ -1,8 +1,10 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import anthropic
 import os
+import re
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from datetime import datetime
@@ -16,6 +18,8 @@ from reportlab.lib.units import inch
 import logging
 import stripe
 
+# Load environment variables
+load_dotenv()
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -26,15 +30,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://proposal-writer-ai.vercel.app"],
+    allow_origins=["http://localhost:5174","http://localhost:3000", "https://proposal-writer-ai.vercel.app"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # Initialize Supabase
@@ -42,6 +45,9 @@ supabase: Client = create_client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_KEY")
 )
+
+# Initialize Anthropic client globally
+anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # Data models
 class ProposalRequest(BaseModel):
@@ -94,7 +100,7 @@ def login(request: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
 @app.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...), authorization: str = Header(None)):
+def upload_document(file: UploadFile = File(...), authorization: str = Header(None)):
     # Get the user ID from the auth header
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing auth token")
@@ -114,11 +120,13 @@ async def upload_document(file: UploadFile = File(...), authorization: str = Hea
             pdf_reader = PdfReader(file.file)
             content = ""
             for page in pdf_reader.pages:
-                content += page.extract_text() + "\n"
+                text = page.extract_text()
+                if text:
+                    content += text + "\n"
         else:
             # Read as plain text
-            content = await file.read()
-            content = content.decode('utf-8')
+            file_bytes = file.file.read()
+            content = file_bytes.decode('utf-8')
         
         # Save to database
         supabase.table("documents").insert({
@@ -132,7 +140,7 @@ async def upload_document(file: UploadFile = File(...), authorization: str = Hea
             "filename": file.filename,
         }
     except Exception as e:
-        print(f"Upload error: {e}")
+        logger.error(f"Upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.get("/documents")
@@ -197,11 +205,8 @@ def generate_proposal(request: ProposalRequest, authorization: str = Header(None
         user_docs = docs_response.data
         doc_context = "\n\n".join([f"Document: {doc['content'][:500]}..." for doc in user_docs]) if user_docs else "No documents uploaded"
     except Exception as e:
-        print(f"Error fetching documents: {e}")
+        logger.error(f"Error fetching documents: {e}")
         doc_context = "No documents available"
-
-    # Generate proposal with Claude
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     prompt = f"""
     You are a professional business proposal writer.
@@ -229,15 +234,18 @@ def generate_proposal(request: ProposalRequest, authorization: str = Header(None
     If you have company information from the documents, reference specific services, pricing models, or case studies.
     """
 
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
-
-    proposal_text = message.content[0].text
+    try:
+        message = anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=1024,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        proposal_text = message.content[0].text
+    except Exception as e:
+        logger.error(f"Claude API error: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to generate proposal from AI: {str(e)}")
 
     # Save to database
     proposal_id = str(uuid.uuid4())
@@ -256,14 +264,61 @@ def generate_proposal(request: ProposalRequest, authorization: str = Header(None
             "created_at": datetime.now().isoformat(),
         }).execute()
     except Exception as e:
-        print(f"Database error: {e}")
-        pass
+        logger.error(f"Database error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save generated proposal to database: {str(e)}")
 
     logger.info(f"Proposal generated successfully. ID: {proposal_id}")
     return {
         "proposal": proposal_text,
         "proposal_id": proposal_id,
     }
+def parse_markdown_to_paragraph(line: str, styles) -> Paragraph:
+    line = line.strip()
+    
+    # Replace markdown bold (**text**) with HTML bold (<b>text</b>)
+    line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+    # Replace markdown italic (*text*) with HTML italic (<i>text</i>)
+    line = re.sub(r'\*(.*?)\*', r'<i>\1</i>', line)
+    
+    if line.startswith("### "):
+        text = line[4:]
+        style = ParagraphStyle(
+            'Heading3_Custom',
+            parent=styles['Heading3'],
+            textColor='#6c47ff',
+            spaceBefore=10,
+            spaceAfter=6,
+            keepWithNext=True
+        )
+        return Paragraph(text, style)
+    elif line.startswith("## "):
+        text = line[3:]
+        style = ParagraphStyle(
+            'Heading2_Custom',
+            parent=styles['Heading2'],
+            textColor='#6c47ff',
+            spaceBefore=14,
+            spaceAfter=8,
+            keepWithNext=True
+        )
+        return Paragraph(text, style)
+    elif line.startswith("# "):
+        text = line[2:]
+        style = ParagraphStyle(
+            'Heading1_Custom',
+            parent=styles['Heading1'],
+            textColor='#6c47ff',
+            spaceBefore=18,
+            spaceAfter=10,
+            keepWithNext=True
+        )
+        return Paragraph(text, style)
+    elif line.startswith("- ") or line.startswith("* "):
+        text = line[2:]
+        return Paragraph(f"&bull; {text}", styles['Normal'])
+    else:
+        return Paragraph(line, styles['Normal'])
+
 @app.post("/proposals/{proposal_id}/download")
 def download_proposal(proposal_id: str, authorization: str = Header(None)):
     # Get the user ID from the auth header
@@ -289,12 +344,6 @@ def download_proposal(proposal_id: str, authorization: str = Header(None)):
 
     # Generate PDF with ReportLab
     try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-        from reportlab.lib.units import inch
-        import io
-
         # Create PDF in memory
         pdf_buffer = io.BytesIO()
         doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
@@ -322,7 +371,7 @@ def download_proposal(proposal_id: str, authorization: str = Header(None)):
         # Add proposal text (split by lines)
         for line in proposal['proposal_text'].split('\n'):
             if line.strip():
-                story.append(Paragraph(line, styles['Normal']))
+                story.append(parse_markdown_to_paragraph(line, styles))
             else:
                 story.append(Spacer(1, 0.1*inch))
 
@@ -331,14 +380,17 @@ def download_proposal(proposal_id: str, authorization: str = Header(None)):
 
         # Build PDF
         doc.build(story)
-        pdf_bytes = pdf_buffer.getvalue()
-
-        return {
-            "pdf_data": pdf_bytes.hex(),
-            "filename": f"{proposal['client_name'].replace(' ', '_')}_proposal.pdf"
-        }
+        pdf_buffer.seek(0)
+        
+        filename = f"{proposal['client_name'].replace(' ', '_')}_proposal.pdf"
+        
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
     except Exception as e:
-        print(f"PDF generation error: {e}")
+        logger.error(f"PDF generation error: {e}")
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 @app.get("/proposals")
 def get_proposals(authorization: str = Header(None)):
@@ -399,11 +451,65 @@ def create_checkout_session(authorization: str = Header(None)):
             cancel_url='https://proposal-writer-ai.vercel.app',
             customer_email=user.user.email,
             metadata={'user_id': user_id},
+            subscription_data={
+                'metadata': {'user_id': user_id}
+            }
         )
         
         return {"sessionId": checkout_session.id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, endpoint_secret
+        )
+    except ValueError as e:
+        logger.error(f"Invalid payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid signature: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    event_type = event['type']
+    logger.info(f"Received Stripe event: {event_type}")
+
+    if event_type == 'checkout.session.completed':
+        session = event['data']['object']
+        user_id = session.get('metadata', {}).get('user_id')
+        if user_id:
+            try:
+                res = supabase.table("subscriptions").select("id").eq("user_id", user_id).execute()
+                if res.data and len(res.data) > 0:
+                    supabase.table("subscriptions").update({"status": "active"}).eq("user_id", user_id).execute()
+                else:
+                    supabase.table("subscriptions").insert({"user_id": user_id, "status": "active"}).execute()
+                logger.info(f"Subscription set to active for user: {user_id}")
+            except Exception as e:
+                logger.error(f"Error activating subscription in DB: {e}")
+                raise HTTPException(status_code=500, detail=f"Database sync failed: {str(e)}")
+
+    elif event_type == 'customer.subscription.deleted':
+        subscription = event['data']['object']
+        user_id = subscription.get('metadata', {}).get('user_id')
+        if user_id:
+            try:
+                supabase.table("subscriptions").update({"status": "inactive"}).eq("user_id", user_id).execute()
+                logger.info(f"Subscription set to inactive for user: {user_id}")
+            except Exception as e:
+                logger.error(f"Error deactivating subscription in DB: {e}")
+                raise HTTPException(status_code=500, detail=f"Database sync failed: {str(e)}")
+
+    return {"status": "success"}
 
 @app.get("/check-subscription")
 def check_subscription(authorization: str = Header(None)):
