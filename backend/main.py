@@ -14,6 +14,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.units import inch
 import logging
+import stripe
+
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 # Configure logging
 logging.basicConfig(
@@ -179,7 +183,20 @@ def generate_proposal(request: ProposalRequest, authorization: str = Header(None
         raise HTTPException(status_code=401, detail="Missing auth token")
     
     token = authorization.split(" ")[1]
+    # Check if user has reached proposal limit
+    try:
+        sub_response = supabase.table("subscriptions").select("*").eq("user_id", user_id).execute()
+        is_pro = sub_response.data and len(sub_response.data) > 0 and sub_response.data[0]['status'] == 'active'
+    except:
+        is_pro = False
     
+    if not is_pro:
+        # Check free tier limit (3 proposals)
+        proposals_response = supabase.table("proposals").select("id").eq("user_id", user_id).execute()
+        proposal_count = len(proposals_response.data) if proposals_response.data else 0
+        
+        if proposal_count >= 3:
+            raise HTTPException(status_code=403, detail="Free tier limit reached. Upgrade to Pro for unlimited proposals.")
     try:
         user = supabase.auth.get_user(token)
         user_id = user.user.id
@@ -353,3 +370,77 @@ def get_proposals(authorization: str = Header(None)):
         return {"proposals": response.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/create-checkout-session")
+def create_checkout_session(authorization: str = Header(None)):
+    """Create a Stripe checkout session for Pro plan"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing auth token")
+    
+    token = authorization.split(" ")[1]
+    
+    try:
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[
+                {
+                    'price_data': {
+                        'currency': 'usd',
+                        'product_data': {
+                            'name': 'ProposalWriterAI Pro',
+                            'description': 'Unlimited proposals, advanced features',
+                        },
+                        'unit_amount': 2900,  # $29.00
+                        'recurring': {
+                            'interval': 'month',
+                            'interval_count': 1,
+                        }
+                    },
+                    'quantity': 1,
+                }
+            ],
+            mode='subscription',
+            success_url='https://proposal-writer-ai.vercel.app?session_id={CHECKOUT_SESSION_ID}',
+            cancel_url='https://proposal-writer-ai.vercel.app',
+            customer_email=user.user.email,
+            metadata={'user_id': user_id},
+        )
+        
+        return {"sessionId": checkout_session.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/check-subscription")
+def check_subscription(authorization: str = Header(None)):
+    """Check if user has active subscription"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing auth token")
+    
+    token = authorization.split(" ")[1]
+    
+    try:
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        # Check if user has subscription in Supabase
+        response = supabase.table("subscriptions").select("*").eq("user_id", user_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            subscription = response.data[0]
+            return {
+                "subscribed": subscription['status'] == 'active',
+                "plan": "pro" if subscription['status'] == 'active' else "free",
+            }
+        
+        return {"subscribed": False, "plan": "free"}
+    except Exception as e:
+        return {"subscribed": False, "plan": "free"}

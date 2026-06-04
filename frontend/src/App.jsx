@@ -13,6 +13,7 @@ export default function App() {
   const [authError, setAuthError] = useState("")
   const [user, setUser] = useState(null)
   const [token, setToken] = useState("")
+  const [showPricing, setShowPricing] = useState(false)
 
   const [form, setForm] = useState({
     client_name: "",
@@ -234,6 +235,26 @@ export default function App() {
       console.error("Failed to download PDF:", error)
     }
     setDownloadingId(null)
+  }
+  async function handleCheckout() {
+  try {
+    const response = await fetch("https://proposalwriterai-api.onrender.com/create-checkout-session", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    
+    const data = await response.json()
+    
+    // Redirect to Stripe checkout (you'll need to add @stripe/stripe-js package)
+    // For now, just show the session ID
+    console.log("Checkout session:", data.sessionId)
+    alert("Checkout session created! Integration with Stripe redirect coming soon.")
+  } catch (error) {
+    console.error("Checkout failed:", error)
+    alert("Failed to start checkout")
+  }
   }
 
   function handleLogout() {
