@@ -178,25 +178,13 @@ def delete_document(document_id: str, authorization: str = Header(None)):
 @app.post("/generate-proposal")
 def generate_proposal(request: ProposalRequest, authorization: str = Header(None)):
     logger.info(f"Proposal generation requested for client: {request.client_name}")
+    
     # Get the user ID from the auth header
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing auth token")
     
     token = authorization.split(" ")[1]
-    # Check if user has reached proposal limit
-    try:
-        sub_response = supabase.table("subscriptions").select("*").eq("user_id", user_id).execute()
-        is_pro = sub_response.data and len(sub_response.data) > 0 and sub_response.data[0]['status'] == 'active'
-    except:
-        is_pro = False
     
-    if not is_pro:
-        # Check free tier limit (3 proposals)
-        proposals_response = supabase.table("proposals").select("id").eq("user_id", user_id).execute()
-        proposal_count = len(proposals_response.data) if proposals_response.data else 0
-        
-        if proposal_count >= 3:
-            raise HTTPException(status_code=403, detail="Free tier limit reached. Upgrade to Pro for unlimited proposals.")
     try:
         user = supabase.auth.get_user(token)
         user_id = user.user.id
@@ -270,6 +258,7 @@ def generate_proposal(request: ProposalRequest, authorization: str = Header(None
     except Exception as e:
         print(f"Database error: {e}")
         pass
+
     logger.info(f"Proposal generated successfully. ID: {proposal_id}")
     return {
         "proposal": proposal_text,
