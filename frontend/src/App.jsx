@@ -372,7 +372,7 @@ export default function App() {
                     {downloadingId === proposalId ? "Downloading..." : "Download PDF"}
                   </button>
                 </div>
-                <div className="proposal-body">{proposal}</div>
+                <div className="proposal-body">{renderProposal(proposal)}</div>
               </div>
             )}
           </div>
@@ -422,7 +422,7 @@ export default function App() {
                     </div>
                     {selectedProposal?.id === p.id && (
                       <div className="proposal-preview">
-                        {p.proposal_text}
+                        {renderProposal(p.proposal_text)}
                       </div>
                     )}
                   </div>
@@ -475,3 +475,89 @@ export default function App() {
     </div>
   )
 }
+
+function renderProposal(text) {
+  if (!text) return null;
+  const lines = text.split("\n");
+  let inList = false;
+  let listItems = [];
+  let inNumList = false;
+  let numListItems = [];
+  const rendered = [];
+
+  const flushList = (key) => {
+    if (listItems.length > 0) {
+      rendered.push(
+        <ul key={key} className="proposal-ul">
+          {listItems.map((item, idx) => (
+            <li key={idx} dangerouslySetInnerHTML={{ __html: item }} />
+          ))}
+        </ul>
+      );
+      listItems = [];
+      inList = false;
+    }
+  };
+
+  const flushNumList = (key) => {
+    if (numListItems.length > 0) {
+      rendered.push(
+        <ol key={key} className="proposal-ol">
+          {numListItems.map((item, idx) => (
+            <li key={idx} dangerouslySetInnerHTML={{ __html: item }} />
+          ))}
+        </ol>
+      );
+      numListItems = [];
+      inNumList = false;
+    }
+  };
+
+  const cleanInline = (t) => {
+    // Bold **text**
+    t = t.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+    // Italic *text*
+    t = t.replace(/\*(.*?)\*/g, "<em>$1</em>");
+    return t;
+  };
+
+  lines.forEach((line, i) => {
+    const stripped = line.strip ? line.strip() : line.trim();
+    if (!stripped) {
+      flushList(`list-${i}`);
+      flushNumList(`numlist-${i}`);
+      return;
+    }
+
+    if (stripped.startsWith("### ")) {
+      flushList(`list-${i}`);
+      flushNumList(`numlist-${i}`);
+      rendered.push(<h4 key={i} className="proposal-h4" dangerouslySetInnerHTML={{ __html: cleanInline(stripped.slice(4)) }} />);
+    } else if (stripped.startsWith("## ")) {
+      flushList(`list-${i}`);
+      flushNumList(`numlist-${i}`);
+      rendered.push(<h3 key={i} className="proposal-h3" dangerouslySetInnerHTML={{ __html: cleanInline(stripped.slice(3)) }} />);
+    } else if (stripped.startsWith("# ")) {
+      flushList(`list-${i}`);
+      flushNumList(`numlist-${i}`);
+      rendered.push(<h2 key={i} className="proposal-h2" dangerouslySetInnerHTML={{ __html: cleanInline(stripped.slice(2)) }} />);
+    } else if (stripped.startsWith("- ") || stripped.startsWith("* ")) {
+      flushNumList(`numlist-${i}`);
+      inList = true;
+      listItems.push(cleanInline(stripped.slice(2)));
+    } else if (/^\d+\.\s+/.test(stripped)) {
+      flushList(`list-${i}`);
+      inNumList = true;
+      numListItems.push(cleanInline(stripped.replace(/^\d+\.\s+/, "")));
+    } else {
+      flushList(`list-${i}`);
+      flushNumList(`numlist-${i}`);
+      rendered.push(<p key={i} className="proposal-p" dangerouslySetInnerHTML={{ __html: cleanInline(stripped) }} />);
+    }
+  });
+
+  flushList("list-final");
+  flushNumList("numlist-final");
+  return <div className="proposal-document">{rendered}</div>;
+}
+

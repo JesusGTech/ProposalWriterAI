@@ -44,9 +44,11 @@ export default function Landing({ onGetStarted, logo }) {
           <a href="#pricing">Pricing</a>
           <a href="#faq">FAQ</a>
         </div>
-        <button className="btn-primary" onClick={onGetStarted}>
-          Get Started Free
-        </button>
+        <div className="nav-right">
+          <button className="btn-primary" onClick={onGetStarted}>
+            Get Started Free
+          </button>
+        </div>
       </nav>
 
       <div className="landing-hero">
@@ -127,17 +129,6 @@ export default function Landing({ onGetStarted, logo }) {
         </div>
       </div>
 
-      {/* Customer Logos Cloud Banner */}
-      <div className="logo-cloud scroll-reveal">
-        <p className="logo-cloud-title">TRUSTED BY FAST-GROWING B2B TEAMS GLOBAL</p>
-        <div className="logo-cloud-grid">
-          <div className="logo-item">ACME CORP</div>
-          <div className="logo-item">LOGITECH</div>
-          <div className="logo-item">TECHSTARTUP</div>
-          <div className="logo-item">GLOBAL INC</div>
-          <div className="logo-item">CLOUDBASE</div>
-        </div>
-      </div>
 
       <div className="landing-features" id="features">
         {[
@@ -390,7 +381,7 @@ export default function Landing({ onGetStarted, logo }) {
           </div>
         </div>
         <div className="footer-bottom">
-          <span>© 2025 ProposalWriterAI · Built with Claude AI</span>
+          <span>© 2026 ProposalWriterAI · Built with Claude AI</span>
           <span className="footer-spark">✦</span>
         </div>
       </footer>
