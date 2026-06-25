@@ -135,11 +135,20 @@ applied manually):
 ALTER TABLE proposals ADD COLUMN status text DEFAULT 'pending'; -- values: won | lost | pending
 ```
 
-This backfills existing rows to `pending`. No new RLS policy is needed — the existing
-user-scoped `UPDATE` policy that allows in-app proposal editing also covers updating
-`status`. Until this column exists, proposal generation still works normally (the outcome
-lookup fails open and simply contributes nothing), but marking a proposal won/lost will
-error.
+This backfills existing rows to `pending`. Until this column exists, proposal generation
+still works normally (the outcome lookup fails open and simply contributes nothing), but
+marking a proposal won/lost will error.
+
+The `proposals` table also needs an **UPDATE** RLS policy (separate from SELECT/INSERT) for
+both win/loss marking and in-app text editing to work. If updates return "proposal not
+found" even though the proposal is visible, add:
+
+```sql
+create policy "Users can update own proposals"
+on proposals for update
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+```
 
 ## API Endpoints
 

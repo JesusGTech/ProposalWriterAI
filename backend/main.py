@@ -676,8 +676,10 @@ def update_proposal(proposal_id: str, update: ProposalUpdate, auth = Depends(get
             .eq("user_id", user_id)
             .execute()
         )
+        # Note: a 0-row result here usually means the proposals table is missing an
+        # UPDATE row-level-security policy (SELECT/INSERT exist but UPDATE is blocked).
         if not response.data:
-            raise HTTPException(status_code=404, detail="Proposal not found")
+            raise HTTPException(status_code=404, detail="Proposal not found (or no UPDATE policy on the proposals table)")
         return {"message": "Proposal updated", "proposal": response.data[0]}
     except HTTPException:
         raise

@@ -345,11 +345,14 @@ export default function App() {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ status }),
       })
-      if (!res.ok) throw new Error("Update failed")
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}))
+        throw new Error(errData.detail || "Update failed")
+      }
       await fetchProposals()
       toast.success(status === "won" ? "Marked as won 🎉" : status === "lost" ? "Marked as lost" : "Reset to pending")
     } catch (e) {
-      toast.error("Could not update status")
+      toast.error(e.message || "Could not update status")
     }
   }
 
