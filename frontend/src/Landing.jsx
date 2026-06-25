@@ -28,6 +28,14 @@ export default function Landing({ onGetStarted, logo }) {
     };
   }, []);
 
+  // Close the legal modal on Escape for keyboard users.
+  useEffect(() => {
+    if (!activeModal) return;
+    const onKey = (e) => { if (e.key === "Escape") setActiveModal(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeModal]);
+
   return (
     <div className="landing">
       {/* Decorative Glow Elements for Parallax */}
@@ -36,7 +44,7 @@ export default function Landing({ onGetStarted, logo }) {
 
       <nav className="landing-nav">
         <div className="nav-left">
-          <img src={logo} alt="ProposalWriterAI" className="brand-logo landing-brand-logo" />
+          <span className="brand-wordmark landing-brand-logo">ProposalWriter<span className="wm-ai">AI</span></span>
         </div>
         <div className="landing-nav-links">
           <a href="#features">Features</a>
@@ -52,9 +60,9 @@ export default function Landing({ onGetStarted, logo }) {
       </nav>
 
       <div className="landing-hero">
-        <div className="hero-badge">✦ Powered by Claude AI</div>
+        <div className="hero-badge">Powered by Claude AI</div>
         <h1 className="hero-title">
-          Write winning proposals<br />in seconds, not hours
+          Write <span className="hl hl-lime">winning</span> proposals<br />in <span className="hl hl-blue">seconds</span>, not hours
         </h1>
         <p className="hero-sub">
           ProposalWriterAI uses AI grounded in your company's actual services,
@@ -80,7 +88,7 @@ export default function Landing({ onGetStarted, logo }) {
           <div className="mockup-body">
             {/* Sidebar */}
             <div className="mockup-sidebar">
-              <div className="mockup-sidebar-logo">✦ ProposalWriterAI</div>
+              <div className="mockup-sidebar-logo">ProposalWriterAI</div>
               <div className="mockup-nav-item active">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/></svg>
                 New Proposal
@@ -109,7 +117,7 @@ export default function Landing({ onGetStarted, logo }) {
                   <div className="mockup-label">Investment / Pricing</div>
                   <div className="mockup-input-val">$15,000 / month</div>
                 </div>
-                <div className="mockup-btn">Generate with Claude ✦</div>
+                <div className="mockup-btn">Generate with Claude</div>
               </div>
               <div className="mockup-output-pane">
                 <div className="mockup-pane-header">
@@ -330,10 +338,19 @@ export default function Landing({ onGetStarted, logo }) {
               a: "Free accounts can upload up to 3 documents. Pro users have unlimited storage for services, case studies, and corporate knowledge base documents."
             }
           ].map((faq, index) => (
-            <div 
-              className={`faq-item ${expandedFaq === index ? "expanded" : ""}`} 
+            <div
+              className={`faq-item ${expandedFaq === index ? "expanded" : ""}`}
               key={index}
+              role="button"
+              tabIndex={0}
+              aria-expanded={expandedFaq === index}
               onClick={() => setExpandedFaq(expandedFaq === index ? null : index)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setExpandedFaq(expandedFaq === index ? null : index);
+                }
+              }}
             >
               <div className="faq-question">
                 <span>{faq.q}</span>
@@ -358,7 +375,7 @@ export default function Landing({ onGetStarted, logo }) {
       <footer className="landing-footer scroll-reveal">
         <div className="footer-grid">
           <div className="footer-brand">
-            <span className="footer-brand-logo">✦ ProposalWriterAI</span>
+            <span className="footer-brand-logo">ProposalWriterAI</span>
             <p>Generate grounded, custom proposals in minutes using advanced Claude AI models.</p>
           </div>
           <div className="footer-column">
@@ -382,7 +399,7 @@ export default function Landing({ onGetStarted, logo }) {
         </div>
         <div className="footer-bottom">
           <span>© 2026 ProposalWriterAI · Built with Claude AI</span>
-          <span className="footer-spark">✦</span>
+          <span className="footer-spark">®</span>
         </div>
       </footer>
 

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import anthropic
 import os
 import re
+import json
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from datetime import datetime
@@ -66,6 +67,9 @@ def get_auth(authorization: str = Header(None)):
     return client, user
 
 
+# Free plan allowance (enforced server-side)
+FREE_PROPOSAL_LIMIT = 3
+
 # Data models
 class ProposalRequest(BaseModel):
     client_name: str
@@ -74,6 +78,10 @@ class ProposalRequest(BaseModel):
     price: str
     your_name: str
     your_company: str
+
+class ProposalUpdate(BaseModel):
+    proposal_text: str | None = None
+    status: str | None = None  # "won" | "lost" | "pending"
 
 class SignupRequest(BaseModel):
     email: str
@@ -171,24 +179,97 @@ def delete_document(document_id: str, auth = Depends(get_auth)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/generate-proposal")
-def generate_proposal(request: ProposalRequest, auth = Depends(get_auth)):
-    db_client, user = auth
-    user_id = user.user.id
-    logger.info(f"Proposal generation requested for client: {request.client_name}")
+def _is_subscribed(db_client, user_id) -> bool:
+    """Return True if the user has an active Pro subscription."""
+    try:
+        res = db_client.table("subscriptions").select("status").eq("user_id", user_id).execute()
+        return bool(res.data) and res.data[0].get("status") == "active"
+    except Exception as e:
+        logger.error(f"Error checking subscription: {e}")
+        return False
 
-    # Get user's documents for context (RAG)
+def _proposal_count(db_client, user_id) -> int:
+    """Return how many proposals the user has generated."""
+    try:
+        res = db_client.table("proposals").select("id", count="exact").eq("user_id", user_id).execute()
+        if res.count is not None:
+            return res.count
+        return len(res.data or [])
+    except Exception as e:
+        logger.error(f"Error counting proposals: {e}")
+        return 0
+
+def _enforce_free_limit(db_client, user_id):
+    """Raise 402 if a free user has exhausted their proposal allowance."""
+    if not _is_subscribed(db_client, user_id) and _proposal_count(db_client, user_id) >= FREE_PROPOSAL_LIMIT:
+        raise HTTPException(
+            status_code=402,
+            detail=f"You've used all {FREE_PROPOSAL_LIMIT} free proposals. Upgrade to Pro for unlimited proposals.",
+        )
+
+def _fetch_doc_context(db_client, user_id) -> str:
+    """Build the company knowledge-base context block from uploaded documents."""
     try:
         docs_response = db_client.table("documents").select("content").eq("user_id", user_id).execute()
         user_docs = docs_response.data
-        doc_context = "\n\n".join([f"Document: {doc['content'][:500]}..." for doc in user_docs]) if user_docs else "No documents uploaded"
+        return "\n\n".join([f"Document: {doc['content'][:500]}..." for doc in user_docs]) if user_docs else "No documents uploaded"
     except Exception as e:
         logger.error(f"Error fetching documents: {e}")
-        doc_context = "No documents available"
+        return "No documents available"
 
-    prompt = f"""
-You are a senior business development consultant who has spent 15 years writing proposals that close deals. 
-You write the way experienced professionals actually communicate — clear, direct, confident, and warm. 
+# How many past outcomes to feed back into each new proposal, and how much
+# of each to include (chars) so the prompt stays bounded in tokens/cost.
+WON_EXAMPLES_LIMIT = 3
+LOST_EXAMPLES_LIMIT = 2
+OUTCOME_EXCERPT_CHARS = 1200
+
+def _fetch_outcome_context(db_client, user_id) -> str:
+    """Build a context block from the user's past won/lost proposals.
+
+    Winning proposals are presented as positive examples to mirror; losing ones
+    as patterns to avoid. Returns "" when the user has no graded outcomes yet.
+    """
+    def _recent(status, limit):
+        try:
+            res = (
+                db_client.table("proposals")
+                .select("proposal_text")
+                .eq("user_id", user_id)
+                .eq("status", status)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return [r["proposal_text"][:OUTCOME_EXCERPT_CHARS] for r in (res.data or []) if r.get("proposal_text")]
+        except Exception as e:
+            logger.error(f"Error fetching {status} proposals: {e}")
+            return []
+
+    won = _recent("won", WON_EXAMPLES_LIMIT)
+    lost = _recent("lost", LOST_EXAMPLES_LIMIT)
+
+    blocks = []
+    if won:
+        examples = "\n\n---\n\n".join(won)
+        blocks.append(
+            "PROVEN WINNING PROPOSALS — these closed real deals. Study and mirror their "
+            "tone, structure, framing, and persuasive moves. Do NOT copy their "
+            "client-specific facts; adapt the approach to the new client below:\n\n"
+            f"{examples}"
+        )
+    if lost:
+        examples = "\n\n---\n\n".join(lost)
+        blocks.append(
+            "PROPOSALS THAT LOST — avoid the framing, weaknesses, or patterns in these:\n\n"
+            f"{examples}"
+        )
+    return "\n\n".join(blocks)
+
+def _build_prompt(request: ProposalRequest, doc_context: str, outcome_context: str = "") -> str:
+    outcome_section = f"\n{outcome_context}\n" if outcome_context else ""
+    return f"""
+You are a senior business development consultant who has spent 15 years writing proposals that close deals.
+You write the way experienced professionals actually communicate — clear, direct, confident, and warm.
 Not corporate fluff. Not AI-speak. Real sentences that a human would write to another human.
 
 CONTEXT:
@@ -200,7 +281,7 @@ CONTEXT:
 
 COMPANY KNOWLEDGE BASE:
 {doc_context}
-
+{outcome_section}
 WRITING RULES — follow these strictly:
 1. Never use hollow filler phrases like "In today's fast-paced world", "leverage", "utilize", "synergy", "cutting-edge", "robust", "seamlessly", "game-changer", or "revolutionary"
 2. Never start a section by restating the section title as a sentence
@@ -233,6 +314,34 @@ TONE: Think of the best proposal you've ever read — the one that felt like it 
 If the company knowledge base has real details (services, pricing, case studies, results), weave them naturally into the narrative. Don't list them — use them as evidence.
 """
 
+def _save_proposal(db_client, user_id, request: ProposalRequest, proposal_text: str) -> str:
+    """Persist a generated proposal and return its id."""
+    proposal_id = str(uuid.uuid4())
+    db_client.table("proposals").insert({
+        "id": proposal_id,
+        "user_id": user_id,
+        "client_name": request.client_name,
+        "client_problem": request.client_problem,
+        "your_solution": request.your_solution,
+        "price": request.price,
+        "your_name": request.your_name,
+        "your_company": request.your_company,
+        "proposal_text": proposal_text,
+        "created_at": datetime.now().isoformat(),
+    }).execute()
+    return proposal_id
+
+@app.post("/generate-proposal")
+def generate_proposal(request: ProposalRequest, auth = Depends(get_auth)):
+    db_client, user = auth
+    user_id = user.user.id
+    logger.info(f"Proposal generation requested for client: {request.client_name}")
+
+    _enforce_free_limit(db_client, user_id)
+    doc_context = _fetch_doc_context(db_client, user_id)
+    outcome_context = _fetch_outcome_context(db_client, user_id)
+    prompt = _build_prompt(request, doc_context, outcome_context)
+
     try:
         message = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -246,22 +355,8 @@ If the company knowledge base has real details (services, pricing, case studies,
         logger.error(f"Claude API error: {e}")
         raise HTTPException(status_code=502, detail=f"Failed to generate proposal from AI: {str(e)}")
 
-    # Save to database
-    proposal_id = str(uuid.uuid4())
-    
     try:
-        db_client.table("proposals").insert({
-            "id": proposal_id,
-            "user_id": user_id,
-            "client_name": request.client_name,
-            "client_problem": request.client_problem,
-            "your_solution": request.your_solution,
-            "price": request.price,
-            "your_name": request.your_name,
-            "your_company": request.your_company,
-            "proposal_text": proposal_text,
-            "created_at": datetime.now().isoformat(),
-        }).execute()
+        proposal_id = _save_proposal(db_client, user_id, request, proposal_text)
     except Exception as e:
         logger.error(f"Database error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save generated proposal to database: {str(e)}")
@@ -271,6 +366,55 @@ If the company knowledge base has real details (services, pricing, case studies,
         "proposal": proposal_text,
         "proposal_id": proposal_id,
     }
+
+@app.post("/generate-proposal-stream")
+def generate_proposal_stream(request: ProposalRequest, auth = Depends(get_auth)):
+    """Stream the proposal token-by-token via Server-Sent Events, then persist it."""
+    db_client, user = auth
+    user_id = user.user.id
+    logger.info(f"Streaming proposal requested for client: {request.client_name}")
+
+    _enforce_free_limit(db_client, user_id)
+    doc_context = _fetch_doc_context(db_client, user_id)
+    outcome_context = _fetch_outcome_context(db_client, user_id)
+    prompt = _build_prompt(request, doc_context, outcome_context)
+
+    def event_stream():
+        full_text = ""
+        try:
+            with anthropic_client.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    full_text += text
+                    yield f"data: {json.dumps({'type': 'delta', 'text': text})}\n\n"
+        except Exception as e:
+            logger.error(f"Claude streaming error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'detail': 'Failed to generate proposal from AI'})}\n\n"
+            return
+
+        try:
+            proposal_id = _save_proposal(db_client, user_id, request, full_text)
+        except Exception as e:
+            logger.error(f"Database error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'detail': 'Failed to save the generated proposal'})}\n\n"
+            return
+
+        logger.info(f"Streamed proposal generated successfully. ID: {proposal_id}")
+        yield f"data: {json.dumps({'type': 'done', 'proposal_id': proposal_id})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable proxy buffering so chunks flush immediately
+        },
+    )
+
 def parse_markdown_to_paragraph(line: str, styles) -> Paragraph:
     line = line.strip()
     
@@ -505,6 +649,56 @@ def get_proposals(auth = Depends(get_auth)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.patch("/proposals/{proposal_id}")
+def update_proposal(proposal_id: str, update: ProposalUpdate, auth = Depends(get_auth)):
+    """Edit a proposal's text and/or its win/loss status.
+
+    Used by the in-app editor (proposal_text) and the History outcome control (status).
+    """
+    db_client, user = auth
+    user_id = user.user.id
+
+    updates = {}
+    if update.proposal_text is not None:
+        updates["proposal_text"] = update.proposal_text
+    if update.status is not None:
+        if update.status not in ("won", "lost", "pending"):
+            raise HTTPException(status_code=400, detail="status must be 'won', 'lost', or 'pending'")
+        updates["status"] = update.status
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+
+    try:
+        response = (
+            db_client.table("proposals")
+            .update(updates)
+            .eq("id", proposal_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        return {"message": "Proposal updated", "proposal": response.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/usage")
+def get_usage(auth = Depends(get_auth)):
+    """Report the user's plan and how many of their free proposals remain."""
+    db_client, user = auth
+    user_id = user.user.id
+    subscribed = _is_subscribed(db_client, user_id)
+    count = _proposal_count(db_client, user_id)
+    return {
+        "count": count,
+        "limit": FREE_PROPOSAL_LIMIT,
+        "subscribed": subscribed,
+        "plan": "pro" if subscribed else "free",
+        "remaining": None if subscribed else max(0, FREE_PROPOSAL_LIMIT - count),
+    }
+
 @app.post("/create-checkout-session")
 def create_checkout_session(auth = Depends(get_auth)):
     """Create a Stripe checkout session for Pro plan"""
@@ -541,7 +735,7 @@ def create_checkout_session(auth = Depends(get_auth)):
             }
         )
         
-        return {"sessionId": checkout_session.id}
+        return {"sessionId": checkout_session.id, "url": checkout_session.url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -16,7 +16,7 @@ export default function App() {
   const [user, setUser] = useState(null)
   const [token, setToken] = useState("")
   const [activeTab, setActiveTab] = useState("new")
-  const [formError, setFormError] = useState("")
+  const [fieldErrors, setFieldErrors] = useState({})
   const [selectedProposal, setSelectedProposal] = useState(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [docsLoading, setDocsLoading] = useState(false)
@@ -30,10 +30,17 @@ export default function App() {
   const [proposal, setProposal] = useState("")
   const [proposalId, setProposalId] = useState("")
   const [loading, setLoading] = useState(false)
+  const [streaming, setStreaming] = useState(false)
+  const [lastForm, setLastForm] = useState(null)
   const [proposals, setProposals] = useState([])
   const [downloadingId, setDownloadingId] = useState(null)
   const [documents, setDocuments] = useState([])
   const [uploading, setUploading] = useState(false)
+  const [usage, setUsage] = useState(null)
+  const [upgrading, setUpgrading] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editText, setEditText] = useState("")
+  const [savingEdit, setSavingEdit] = useState(false)
 
   useEffect(() => {
     const savedToken = localStorage.getItem("pw_token")
@@ -50,6 +57,7 @@ export default function App() {
     if (token) {
       fetchProposals()
       fetchDocuments()
+      fetchUsage()
     }
   }, [token])
 
@@ -115,6 +123,14 @@ export default function App() {
     setHistoryLoading(false)
   }
 
+  async function fetchUsage() {
+    try {
+      const res = await fetch(`${API}/usage`, { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      setUsage(data)
+    } catch (e) {}
+  }
+
   async function fetchDocuments() {
     setDocsLoading(true)
     try {
@@ -161,42 +177,180 @@ export default function App() {
   }
 
   function handleChange(e) {
-    setForm({ ...form, [e.target.name]: e.target.value })
+    const { name, value } = e.target
+    setForm({ ...form, [name]: value })
+    if (fieldErrors[name]) {
+      setFieldErrors(prev => {
+        const next = { ...prev }
+        delete next[name]
+        return next
+      })
+    }
   }
 
-  async function handleSubmit() {
-    if (!form.your_name.trim()) { setFormError("Please enter your name"); return }
-    if (!form.your_company.trim()) { setFormError("Please enter your company"); return }
-    if (!form.client_name.trim()) { setFormError("Please enter the client name"); return }
-    if (!form.price.trim()) { setFormError("Please enter a price"); return }
-    if (!form.client_problem.trim()) { setFormError("Please describe the client's problem"); return }
-    if (!form.your_solution.trim()) { setFormError("Please describe your solution"); return }
+  function validateForm() {
+    const errors = {}
+    if (!form.your_name.trim()) errors.your_name = "Please enter your name"
+    if (!form.your_company.trim()) errors.your_company = "Please enter your company"
+    if (!form.client_name.trim()) errors.client_name = "Please enter the client name"
+    if (!form.price.trim()) errors.price = "Please enter a price"
+    if (!form.client_problem.trim()) errors.client_problem = "Describe the client's problem"
+    if (!form.your_solution.trim()) errors.your_solution = "Describe your solution"
+    return errors
+  }
 
-    setFormError("")
+  const atFreeLimit = usage && !usage.subscribed && (usage.remaining ?? 0) <= 0
+  const wonCount = proposals.filter(p => p.status === "won").length
+  const lostCount = proposals.filter(p => p.status === "lost").length
+
+  async function handleSubmit() {
+    const errors = validateForm()
+    if (Object.keys(errors).length) {
+      setFieldErrors(errors)
+      toast.error("Please fill in the highlighted fields")
+      return
+    }
+    setFieldErrors({})
+    if (atFreeLimit) {
+      toast.error("You've used all your free proposals. Upgrade to Pro to continue.")
+      return
+    }
+    await runGeneration({ ...form })
+  }
+
+  function handleRegenerate() {
+    if (lastForm) runGeneration(lastForm)
+  }
+
+  // Streams the proposal token-by-token from the backend SSE endpoint.
+  async function runGeneration(formData) {
+    setEditing(false)
     setLoading(true)
+    setStreaming(false)
     setProposal("")
     setProposalId("")
+    setLastForm(formData)
     try {
-      const res = await fetch(`${API}/generate-proposal`, {
+      const res = await fetch(`${API}/generate-proposal-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(form),
+        body: JSON.stringify(formData),
       })
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
         const errData = await res.json().catch(() => ({}))
+        if (res.status === 402) {
+          toast.error(errData.detail || "Free plan limit reached")
+          await fetchUsage()
+          return
+        }
         throw new Error(errData.detail || "Failed to generate proposal")
       }
-      const data = await res.json()
-      setProposal(data.proposal)
-      setProposalId(data.proposal_id)
-      setForm({ client_name: "", client_problem: "", your_solution: "", price: "", your_name: "", your_company: "" })
-      await fetchProposals()
-      toast.success("Proposal generated!")
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let acc = ""
+      setStreaming(true)
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let sep
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const rawEvent = buffer.slice(0, sep).trim()
+          buffer = buffer.slice(sep + 2)
+          if (!rawEvent.startsWith("data:")) continue
+          let evt
+          try { evt = JSON.parse(rawEvent.slice(5).trim()) } catch { continue }
+          if (evt.type === "delta") {
+            acc += evt.text
+            setProposal(acc)
+          } else if (evt.type === "done") {
+            setProposalId(evt.proposal_id)
+            await fetchProposals()
+            await fetchUsage()
+            toast.success("Proposal generated!")
+          } else if (evt.type === "error") {
+            throw new Error(evt.detail || "Generation failed")
+          }
+        }
+      }
     } catch (e) {
-      setProposal(e.message || "Something went wrong. Please try again.")
       toast.error(e.message || "Failed to generate proposal")
+      setProposal(prev => prev || (e.message || "Something went wrong. Please try again."))
+    } finally {
+      setLoading(false)
+      setStreaming(false)
     }
-    setLoading(false)
+  }
+
+  async function handleUpgrade() {
+    setUpgrading(true)
+    try {
+      const res = await fetch(`${API}/create-checkout-session`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.url) {
+        window.location.href = data.url
+      } else {
+        toast.error("Could not start checkout")
+      }
+    } catch (e) {
+      toast.error("Could not start checkout")
+    }
+    setUpgrading(false)
+  }
+
+  function startEdit() {
+    setEditText(proposal)
+    setEditing(true)
+  }
+
+  async function saveEdit() {
+    if (!proposalId) return
+    setSavingEdit(true)
+    try {
+      const res = await fetch(`${API}/proposals/${proposalId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ proposal_text: editText }),
+      })
+      if (!res.ok) throw new Error("Save failed")
+      setProposal(editText)
+      setEditing(false)
+      await fetchProposals()
+      toast.success("Changes saved")
+    } catch (e) {
+      toast.error("Could not save changes")
+    }
+    setSavingEdit(false)
+  }
+
+  async function handleCopy(text) {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success("Copied to clipboard")
+    } catch (e) {
+      toast.error("Copy failed")
+    }
+  }
+
+  async function handleSetStatus(propId, status) {
+    try {
+      const res = await fetch(`${API}/proposals/${propId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ status }),
+      })
+      if (!res.ok) throw new Error("Update failed")
+      await fetchProposals()
+      toast.success(status === "won" ? "Marked as won 🎉" : status === "lost" ? "Marked as lost" : "Reset to pending")
+    } catch (e) {
+      toast.error("Could not update status")
+    }
   }
 
   async function handleDownloadPDF(propId) {
@@ -239,6 +393,11 @@ export default function App() {
     setEmail("")
     setPassword("")
     setShowLanding(true)
+    setUsage(null)
+    setProposal("")
+    setProposalId("")
+    setEditing(false)
+    setLastForm(null)
   }
 
   // Show landing page
@@ -257,7 +416,7 @@ export default function App() {
         }} />
         <div className="auth-card">
           <div className="auth-logo">
-            <img src={logo} alt="ProposalWriterAI" className="brand-logo auth-brand-logo" />
+            <span className="brand-wordmark auth-brand-logo">ProposalWriter<span className="wm-ai">AI</span></span>
           </div>
           <h2 className="auth-title">
             {authState === "login" ? "Welcome back" : "Get started"}
@@ -295,14 +454,14 @@ export default function App() {
   return (
     <div className="app-wrap">
       <Toaster position="bottom-right" toastOptions={{
-        style: { background: '#1a1a24', color: '#f0f0f8', border: '1px solid #ffffff18', fontSize: '14px' },
-        success: { iconTheme: { primary: '#00e5a0', secondary: '#1a1a24' } },
-        error: { iconTheme: { primary: '#ff4444', secondary: '#1a1a24' } },
+        style: { background: '#FFFFFF', color: '#0A0A0A', border: '1px solid #0A0A0A', borderRadius: 0, fontSize: '13px', fontWeight: 500 },
+        success: { iconTheme: { primary: '#0A0A0A', secondary: '#FFFFFF' } },
+        error: { iconTheme: { primary: '#E5311E', secondary: '#FFFFFF' } },
       }} />
 
       <nav className="navbar">
         <div className="nav-left">
-          <img src={logo} alt="ProposalWriterAI" className="brand-logo nav-brand-logo" />
+          <span className="brand-wordmark nav-brand-logo">ProposalWriter<span className="wm-ai">AI</span></span>
         </div>
         <div className="nav-tabs">
           {["new", "history", "docs"].map(tab => (
@@ -312,6 +471,13 @@ export default function App() {
           ))}
         </div>
         <div className="nav-right">
+          {usage && (usage.subscribed ? (
+            <span className="plan-pill plan-pro">★ Pro</span>
+          ) : (
+            <button className="plan-pill plan-free" onClick={handleUpgrade} disabled={upgrading} title="Upgrade to Pro">
+              {Math.max(0, usage.remaining ?? 0)} / {usage.limit} free left · Upgrade
+            </button>
+          ))}
           <span className="nav-email">{user?.email}</span>
           <button className="btn-outline-sm" onClick={handleLogout}>Sign out</button>
         </div>
@@ -328,14 +494,15 @@ export default function App() {
             <div className="card">
               <div className="form-grid">
                 {[
-                  { label: "Your Name", name: "your_name", placeholder: "Fulano Detal" },
-                  { label: "Your Company", name: "your_company", placeholder: "Company Inc." },
-                  { label: "Client Name", name: "client_name", placeholder: "TheClients Corp" },
-                  { label: "Price / Investment", name: "price", placeholder: "One time payment or subscription" },
+                  { label: "Your Name", name: "your_name", placeholder: "Jane Smith" },
+                  { label: "Your Company", name: "your_company", placeholder: "Acme Inc." },
+                  { label: "Client Name", name: "client_name", placeholder: "Globex Corp" },
+                  { label: "Price / Investment", name: "price", placeholder: "$5,000 one-time or $1,200/mo" },
                 ].map(f => (
                   <div className="field" key={f.name}>
-                    <label>{f.label}</label>
-                    <input name={f.name} value={form[f.name]} onChange={handleChange} placeholder={f.placeholder} className="input" />
+                    <label htmlFor={f.name}>{f.label}</label>
+                    <input id={f.name} name={f.name} value={form[f.name]} onChange={handleChange} placeholder={f.placeholder} className={`input ${fieldErrors[f.name] ? "input-error" : ""}`} />
+                    {fieldErrors[f.name] && <span className="field-error">{fieldErrors[f.name]}</span>}
                   </div>
                 ))}
               </div>
@@ -345,8 +512,9 @@ export default function App() {
                 { label: "Your Solution", name: "your_solution", placeholder: "Describe how you solve it..." },
               ].map(f => (
                 <div className="field" key={f.name}>
-                  <label>{f.label}</label>
-                  <textarea name={f.name} value={form[f.name]} onChange={handleChange} placeholder={f.placeholder} className="input textarea" rows={4} />
+                  <label htmlFor={f.name}>{f.label}</label>
+                  <textarea id={f.name} name={f.name} value={form[f.name]} onChange={handleChange} placeholder={f.placeholder} className={`input textarea ${fieldErrors[f.name] ? "input-error" : ""}`} rows={4} />
+                  {fieldErrors[f.name] && <span className="field-error">{fieldErrors[f.name]}</span>}
                 </div>
               ))}
 
@@ -357,22 +525,68 @@ export default function App() {
                 </div>
               )}
 
-              {formError && <div className="form-error">{formError}</div>}
+              {wonCount > 0 && (
+                <div className="doc-notice notice-won">
+                  <span className="doc-dot" />
+                  {wonCount} winning proposal{wonCount > 1 ? "s" : ""} loaded — Claude will mirror what works
+                  {lostCount > 0 ? ` and avoid ${lostCount} that lost` : ""}
+                </div>
+              )}
 
-              <button className="btn-primary full" onClick={handleSubmit} disabled={loading}>
-                {loading ? <span className="loading-dots">Generating<span>.</span><span>.</span><span>.</span></span> : "Generate Proposal →"}
-              </button>
+              {atFreeLimit ? (
+                <div className="upgrade-banner">
+                  <div className="upgrade-banner-text">
+                    <strong>You've used all {usage?.limit} free proposals.</strong>
+                    <span>Upgrade to Pro for unlimited proposals.</span>
+                  </div>
+                  <button className="btn-primary-sm" onClick={handleUpgrade} disabled={upgrading}>
+                    {upgrading ? "Redirecting…" : "Upgrade to Pro"}
+                  </button>
+                </div>
+              ) : (
+                <button className="btn-primary full" onClick={handleSubmit} disabled={loading}>
+                  {loading ? <span className="loading-dots">Generating<span>.</span><span>.</span><span>.</span></span> : "Generate Proposal →"}
+                </button>
+              )}
             </div>
 
             {proposal && (
               <div className="card proposal-output">
                 <div className="proposal-header">
-                  <h3>Generated Proposal</h3>
-                  <button className="btn-primary-sm" onClick={() => handleDownloadPDF(proposalId)} disabled={downloadingId === proposalId}>
-                    {downloadingId === proposalId ? "Downloading..." : "Download PDF"}
-                  </button>
+                  <h3>{streaming ? "Writing your proposal…" : "Generated Proposal"}</h3>
+                  <div className="proposal-actions">
+                    {editing ? (
+                      <>
+                        <button className="btn-outline-sm" onClick={() => setEditing(false)} disabled={savingEdit}>Cancel</button>
+                        <button className="btn-primary-sm" onClick={saveEdit} disabled={savingEdit}>
+                          {savingEdit ? "Saving…" : "Save changes"}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="btn-outline-sm" onClick={handleRegenerate} disabled={loading || !lastForm}>↻ Regenerate</button>
+                        <button className="btn-outline-sm" onClick={() => handleCopy(proposal)} disabled={loading}>Copy</button>
+                        <button className="btn-outline-sm" onClick={startEdit} disabled={loading || !proposalId}>Edit</button>
+                        <button className="btn-primary-sm" onClick={() => handleDownloadPDF(proposalId)} disabled={loading || downloadingId === proposalId || !proposalId}>
+                          {downloadingId === proposalId ? "Downloading..." : "Download PDF"}
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div className="proposal-body">{renderProposal(proposal)}</div>
+                {editing ? (
+                  <textarea
+                    className="input textarea proposal-edit"
+                    value={editText}
+                    onChange={e => setEditText(e.target.value)}
+                    rows={20}
+                  />
+                ) : (
+                  <div className="proposal-body">
+                    {renderProposal(proposal)}
+                    {streaming && <span className="stream-cursor" />}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -404,10 +618,25 @@ export default function App() {
                       onClick={() => setSelectedProposal(selectedProposal?.id === p.id ? null : p)}
                     >
                       <div className="proposal-card-info">
-                        <div className="proposal-card-title">{p.client_name}</div>
+                        <div className="proposal-card-title">
+                          {p.client_name}
+                          {p.status === "won" && <span className="status-badge sb-won">Won</span>}
+                          {p.status === "lost" && <span className="status-badge sb-lost">Lost</span>}
+                        </div>
                         <div className="proposal-card-meta">{p.your_company} · {new Date(p.created_at).toLocaleDateString()} · {p.price}</div>
                       </div>
-                      <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                        <div className="status-control" onClick={e => e.stopPropagation()}>
+                          {["won", "lost", "pending"].map(s => (
+                            <button
+                              key={s}
+                              className={`status-btn ${(p.status || "pending") === s ? `active sb-${s}` : ""}`}
+                              onClick={e => { e.stopPropagation(); handleSetStatus(p.id, s) }}
+                            >
+                              {s === "won" ? "Won" : s === "lost" ? "Lost" : "Pending"}
+                            </button>
+                          ))}
+                        </div>
                         <span style={{ fontSize: "12px", color: "var(--text3)" }}>
                           {selectedProposal?.id === p.id ? "▲ Hide" : "▼ View"}
                         </span>
