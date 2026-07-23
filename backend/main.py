@@ -91,6 +91,13 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    access_token: str
+    new_password: str
+
 # Endpoints
 @app.get("/")
 def read_root():
@@ -123,7 +130,38 @@ def login(request: LoginRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+
+@app.post("/auth/forgot-password")
+def forgot_password(request: ForgotPasswordRequest):
+    """Send a Supabase password-reset email that links back to the app."""
+    try:
+        supabase.auth.reset_password_email(
+            request.email,
+            {"redirect_to": "https://proposal-writer-ai.vercel.app"},
+        )
+        # Always report success so we don't leak which emails have accounts.
+        return {"message": "If that email has an account, a reset link is on its way."}
+    except Exception as e:
+        logger.error(f"Forgot-password error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/auth/reset-password")
+def reset_password(request: ResetPasswordRequest):
+    """Set a new password using the recovery access token from the email link."""
+    try:
+        user_response = supabase.auth.get_user(request.access_token)
+        user_id = user_response.user.id
+    except Exception as e:
+        logger.error(f"Reset-password token error: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired reset link")
+
+    try:
+        supabase.auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        return {"message": "Password updated"}
+    except Exception as e:
+        logger.error(f"Reset-password update error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.post("/documents/upload")
 def upload_document(file: UploadFile = File(...), auth = Depends(get_auth)):
     db_client, user = auth

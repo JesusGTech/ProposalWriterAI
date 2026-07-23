@@ -42,7 +42,27 @@ export default function App() {
   const [editText, setEditText] = useState("")
   const [savingEdit, setSavingEdit] = useState(false)
 
+  // Password reset flow
+  const [resetEmail, setResetEmail] = useState("")
+  const [resetSent, setResetSent] = useState(false)
+  const [newPassword, setNewPassword] = useState("")
+  const [resetSuccess, setResetSuccess] = useState(false)
+
   useEffect(() => {
+    // Supabase password-recovery links land here with a URL hash like
+    // #access_token=...&type=recovery — route those straight to the reset screen.
+    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash
+    const hashParams = new URLSearchParams(hash)
+    if (hashParams.get("type") === "recovery") {
+      const recoveryToken = hashParams.get("access_token")
+      if (recoveryToken) {
+        setToken(recoveryToken)
+        setAuthState("reset")
+        setShowLanding(false)
+        return
+      }
+    }
+
     const savedToken = localStorage.getItem("pw_token")
     const savedUser = localStorage.getItem("pw_user")
     if (savedToken && savedUser) {
@@ -54,12 +74,12 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (token) {
+    if (token && authState === "app") {
       fetchProposals()
       fetchDocuments()
       fetchUsage()
     }
-  }, [token])
+  }, [token, authState])
 
   async function handleSignup() {
     setAuthError("")
@@ -110,6 +130,64 @@ export default function App() {
       }
     } catch (e) {
       setAuthError("Connection failed")
+    }
+  }
+
+  async function handleForgotPassword() {
+    setAuthError("")
+    if (!resetEmail.trim()) {
+      setAuthError("Please enter your email")
+      return
+    }
+    try {
+      const res = await fetch(`${API}/auth/forgot-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: resetEmail }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || "Could not send reset link")
+      }
+      setResetSent(true)
+      toast.success("Reset link sent!")
+    } catch (e) {
+      setAuthError(e.message || "Could not send reset link")
+    }
+  }
+
+  async function handleResetPassword() {
+    setAuthError("")
+    if (!newPassword.trim()) {
+      setAuthError("Please enter a new password")
+      return
+    }
+    if (newPassword.length < 6) {
+      setAuthError("Password must be at least 6 characters")
+      return
+    }
+    try {
+      const res = await fetch(`${API}/auth/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: token, new_password: newPassword }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || "Could not update password")
+      }
+      setResetSuccess(true)
+      toast.success("Password updated!")
+      setTimeout(() => {
+        // Clear the recovery hash and return to a clean login screen.
+        window.history.replaceState(null, "", window.location.pathname + window.location.search)
+        setToken("")
+        setNewPassword("")
+        setResetSuccess(false)
+        setAuthState("login")
+      }, 2000)
+    } catch (e) {
+      setAuthError(e.message || "Could not update password")
     }
   }
 
@@ -292,14 +370,14 @@ export default function App() {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       })
-      const data = await res.json()
-      if (data.url) {
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && data.url) {
         window.location.href = data.url
       } else {
-        toast.error("Could not start checkout")
+        toast.error(data.detail || "Could not start checkout")
       }
     } catch (e) {
-      toast.error("Could not start checkout")
+      toast.error("Could not start checkout — is the server reachable?")
     }
     setUpgrading(false)
   }
@@ -421,33 +499,95 @@ export default function App() {
           <div className="auth-logo">
             <span className="brand-wordmark auth-brand-logo">ProposalWriter<span className="wm-ai">AI</span></span>
           </div>
-          <h2 className="auth-title">
-            {authState === "login" ? "Welcome back" : "Get started"}
-          </h2>
-          <p className="auth-sub">
-            {authState === "login" ? "Sign in to your account" : "Create your free account"}
-          </p>
 
-          <div className="field">
-            <label>Email</label>
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" className="input" />
-          </div>
-          <div className="field">
-            <label>Password</label>
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" className="input" />
-          </div>
+          {authState === "forgot" ? (
+            <>
+              <h2 className="auth-title">Reset password</h2>
+              <p className="auth-sub">Enter your email and we'll send you a reset link</p>
 
-          {authError && <div className="auth-error">{authError}</div>}
+              {resetSent ? (
+                <div className="auth-success">
+                  Check your email — we sent a reset link to {resetEmail}
+                </div>
+              ) : (
+                <>
+                  <div className="field">
+                    <label htmlFor="reset-email">Email</label>
+                    <input id="reset-email" type="email" value={resetEmail} onChange={e => setResetEmail(e.target.value)} placeholder="you@company.com" className="input" />
+                  </div>
 
-          <button className="btn-primary" style={{ width: "100%", marginBottom: "12px" }} onClick={authState === "login" ? handleLogin : handleSignup}>
-            {authState === "login" ? "Sign in" : "Create account"}
-          </button>
-          <button className="btn-ghost" onClick={() => { setAuthState(authState === "login" ? "signup" : "login"); setAuthError("") }}>
-            {authState === "login" ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
-          </button>
-          <button className="btn-ghost" style={{ marginTop: "8px" }} onClick={() => setShowLanding(true)}>
-            ← Back to home
-          </button>
+                  {authError && <div className="auth-error">{authError}</div>}
+
+                  <button className="btn-primary" style={{ width: "100%", marginBottom: "12px" }} onClick={handleForgotPassword}>
+                    Send reset link
+                  </button>
+                </>
+              )}
+
+              <button className="btn-ghost" onClick={() => { setAuthState("login"); setAuthError(""); setResetSent(false) }}>
+                ← Back to sign in
+              </button>
+            </>
+          ) : authState === "reset" ? (
+            <>
+              <h2 className="auth-title">Set new password</h2>
+              <p className="auth-sub">Choose a strong password for your account</p>
+
+              {resetSuccess ? (
+                <div className="auth-success">
+                  Password updated! Redirecting you to sign in…
+                </div>
+              ) : (
+                <>
+                  <div className="field">
+                    <label htmlFor="new-password">New password</label>
+                    <input id="new-password" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="••••••••" className="input" />
+                  </div>
+
+                  {authError && <div className="auth-error">{authError}</div>}
+
+                  <button className="btn-primary" style={{ width: "100%" }} onClick={handleResetPassword}>
+                    Update password
+                  </button>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <h2 className="auth-title">
+                {authState === "login" ? "Welcome back" : "Get started"}
+              </h2>
+              <p className="auth-sub">
+                {authState === "login" ? "Sign in to your account" : "Create your free account"}
+              </p>
+
+              <div className="field">
+                <label>Email</label>
+                <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" className="input" />
+              </div>
+              <div className="field">
+                <label>Password</label>
+                <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" className="input" />
+              </div>
+
+              {authError && <div className="auth-error">{authError}</div>}
+
+              <button className="btn-primary" style={{ width: "100%", marginBottom: "12px" }} onClick={authState === "login" ? handleLogin : handleSignup}>
+                {authState === "login" ? "Sign in" : "Create account"}
+              </button>
+              {authState === "login" && (
+                <button className="btn-ghost" onClick={() => { setAuthState("forgot"); setAuthError(""); setResetSent(false); setResetEmail("") }}>
+                  Forgot password?
+                </button>
+              )}
+              <button className="btn-ghost" onClick={() => { setAuthState(authState === "login" ? "signup" : "login"); setAuthError("") }}>
+                {authState === "login" ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
+              </button>
+              <button className="btn-ghost" style={{ marginTop: "8px" }} onClick={() => setShowLanding(true)}>
+                ← Back to home
+              </button>
+            </>
+          )}
         </div>
       </div>
     )

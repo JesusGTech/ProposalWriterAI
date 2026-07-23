@@ -278,6 +278,19 @@ button { font-family: var(--font); cursor: pointer; }
   margin-bottom: 18px;
 }
 
+.auth-success {
+  background: var(--lime);
+  border: 2px solid var(--ink);
+  border-radius: var(--radius-sm);
+  box-shadow: 3px 3px 0 var(--ink);
+  color: var(--ink);
+  padding: 13px 15px;
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.45;
+  margin-bottom: 18px;
+}
+
 /* ============================================================
    APP SHELL
    ============================================================ */
