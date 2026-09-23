@@ -7,7 +7,7 @@ import os
 import re
 import json
 from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
 from datetime import datetime
 import uuid
 from PyPDF2 import PdfReader
@@ -96,6 +96,7 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     access_token: str
+    refresh_token: str
     new_password: str
 
 # Endpoints
@@ -160,20 +161,30 @@ def forgot_password(request: ForgotPasswordRequest):
 
 @app.post("/auth/reset-password")
 def reset_password(request: ResetPasswordRequest):
-    """Set a new password using the recovery access token from the email link."""
+    """Update the existing user through their recovery session, without admin access."""
+    recovery_client = create_client(
+        os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"),
+        options=ClientOptions(auto_refresh_token=False, persist_session=False),
+    )
     try:
-        user_response = supabase.auth.get_user(request.access_token)
-        user_id = user_response.user.id
+        response = recovery_client.auth.set_session(request.access_token, request.refresh_token)
+        if not response.user or not response.session:
+            raise ValueError("Missing recovery session")
     except Exception as e:
-        logger.error(f"Reset-password token error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid or expired reset link")
+        logger.warning("Reset-password session failed: type=%s code=%s", type(e).__name__, getattr(e, "code", None))
+        raise HTTPException(status_code=401, detail="Invalid or expired reset link. Please request a new one.") from e
 
     try:
-        supabase.auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        recovery_client.auth.update_user({"password": request.new_password})
         return {"message": "Password updated"}
     except Exception as e:
-        logger.error(f"Reset-password update error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+        code = getattr(e, "code", None)
+        logger.warning("Reset-password update failed: type=%s code=%s", type(e).__name__, code)
+        if code == "same_password":
+            raise HTTPException(status_code=400, detail="Choose a password different from your current password.") from e
+        if code == "weak_password":
+            raise HTTPException(status_code=400, detail="Choose a stronger password that meets the account password requirements.") from e
+        raise HTTPException(status_code=400, detail="Could not update your password. Please request a new reset link and try again.") from e
 
 @app.post("/documents/upload")
 def upload_document(file: UploadFile = File(...), auth = Depends(get_auth)):

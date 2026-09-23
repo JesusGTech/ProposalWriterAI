@@ -47,6 +47,7 @@ export default function App() {
   const [resetSent, setResetSent] = useState(false)
   const [newPassword, setNewPassword] = useState("")
   const [resetSuccess, setResetSuccess] = useState(false)
+  const [recoveryRefreshToken, setRecoveryRefreshToken] = useState("")
 
   useEffect(() => {
     // Supabase password-recovery links land here with a URL hash like
@@ -55,12 +56,18 @@ export default function App() {
     const hashParams = new URLSearchParams(hash)
     if (hashParams.get("type") === "recovery") {
       const recoveryToken = hashParams.get("access_token")
-      if (recoveryToken) {
+      const refreshToken = hashParams.get("refresh_token")
+      if (recoveryToken && refreshToken) {
         setToken(recoveryToken)
+        setRecoveryRefreshToken(refreshToken)
         setAuthState("reset")
         setShowLanding(false)
         return
       }
+      setAuthState("forgot")
+      setShowLanding(false)
+      setAuthError("Invalid or incomplete reset link. Please request a new one.")
+      return
     }
 
     const savedToken = localStorage.getItem("pw_token")
@@ -170,7 +177,7 @@ export default function App() {
       const res = await fetch(`${API}/auth/reset-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ access_token: token, new_password: newPassword }),
+        body: JSON.stringify({ access_token: token, refresh_token: recoveryRefreshToken, new_password: newPassword }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -182,6 +189,10 @@ export default function App() {
         // Clear the recovery hash and return to a clean login screen.
         window.history.replaceState(null, "", window.location.pathname + window.location.search)
         setToken("")
+        setRecoveryRefreshToken("")
+        localStorage.removeItem("pw_token")
+        localStorage.removeItem("pw_user")
+        setUser(null)
         setNewPassword("")
         setResetSuccess(false)
         setAuthState("login")
