@@ -120,16 +120,29 @@ def signup(request: SignupRequest):
 @app.post("/auth/login")
 def login(request: LoginRequest):
     try:
-        response = supabase.auth.sign_in_with_password({
-            "email": request.email,
+        # Password sign-in mutates the client's session; keep it request-local.
+        auth_client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+        response = auth_client.auth.sign_in_with_password({
+            "email": request.email.strip(),
             "password": request.password,
         })
-        return {
-            "user": response.user.dict() if response.user else None,
-            "session": response.session.dict() if response.session else None,
-        }
     except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        code = getattr(e, "code", None)
+        status = getattr(e, "status", None)
+        # Never log credentials, tokens, or raw provider error messages.
+        logger.warning("Sign-in failed: type=%s code=%s status=%s", type(e).__name__, code, status)
+        if code == "email_not_confirmed":
+            raise HTTPException(status_code=403, detail="Please confirm your email before signing in.") from e
+        if code == "invalid_credentials":
+            raise HTTPException(status_code=401, detail="Email or password was not accepted.") from e
+        if status == 429:
+            raise HTTPException(status_code=429, detail="Too many sign-in attempts. Please try again later.") from e
+        raise HTTPException(status_code=503, detail="Sign-in is temporarily unavailable. Please try again shortly.") from e
+
+    if not response.user or not response.session:
+        logger.warning("Sign-in returned no user or session")
+        raise HTTPException(status_code=503, detail="Sign-in did not return a session. Please try again shortly.")
+    return {"user": response.user.dict(), "session": response.session.dict()}
 
 @app.post("/auth/forgot-password")
 def forgot_password(request: ForgotPasswordRequest):

@@ -114,10 +114,10 @@ export default function App() {
       const res = await fetch(`${API}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: email.trim(), password }),
       })
       const data = await res.json()
-      if (data.user) {
+      if (res.ok && data.user && data.session?.access_token) {
         localStorage.setItem("pw_token", data.session.access_token)
         localStorage.setItem("pw_user", JSON.stringify(data.user))
         setUser(data.user)
@@ -126,7 +126,7 @@ export default function App() {
         setShowLanding(false)
         toast.success("Welcome back!")
       } else {
-        setAuthError("Invalid email or password")
+        setAuthError(data.detail || "Sign-in failed. Please try again.")
       }
     } catch (e) {
       setAuthError("Connection failed")
@@ -932,4 +932,3 @@ function renderProposal(text) {
   flushNumList("numlist-final");
   return <div className="proposal-document">{rendered}</div>;
 }
-
